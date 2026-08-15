@@ -1,75 +1,57 @@
-use serde::Deserialize;
-use std::fs;
-use std::process::Command;
-
-#[derive(Deserialize)]
-struct Recipe {
-    package: Package,
-    source: Source,
-    build: Build,
-}
-
-#[derive(Deserialize)]
-struct Package {
-    name: String,
-    version: String,
-}
-
-#[derive(Deserialize)]
-struct Source {
-    url: String,
-    tag: String,
-}
-
-#[derive(Deserialize)]
-struct Build {
-    #[serde(rename = "type")]
-    kind: String,
-    args: Vec<String>,
-    output: String,
-}
-
-fn read_recipe(nombre: &str) -> Recipe {
-    let ruta = format!("recipes/{nombre}.toml");
-    let contenido = fs::read_to_string(&ruta).unwrap_or_else(|_| {
-        eprintln!("No existe la receta '{nombre}' en recipes/");
-        std::process::exit(1);
-    });
-    toml::from_str(&contenido).unwrap_or_else(|e| {
-        eprintln!("Receta inválida {ruta}: {e}");
-        std::process::exit(1);
-    })
-}
+use crate::recipe;
+use std::{fs, process::Command};
 
 fn run(cmd: &str, args: &[&str], dir: Option<&str>) {
-    let mut c = Command::new(cmd);
-    c.args(args);
-    if let Some(d) = dir {
-        c.current_dir(d);
+    if !run_ok(cmd, args, dir) {
+        std::process::exit(1);
     }
-    let status = c.status().unwrap_or_else(|e| {
+}
+
+fn run_ok(cmd: &str, args: &[&str], dir: Option<&str>) -> bool {
+    let status = match dir {
+        Some(d) => Command::new(cmd).args(args).current_dir(d).status(),
+        None => Command::new(cmd).args(args).status(),
+    };
+    let status = match status {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("No se pudo ejecutar '{cmd}': {e}");
+            return false;
+        }
+    };
+    if status.success() {
+        return true;
+    }
+    eprintln!("'{cmd}' falló con código {}", status.code().unwrap_or(-1));
+    false
+}
+
+fn out(cmd: &str, args: &[&str]) -> String {
+    let o = Command::new(cmd).args(args).output().unwrap_or_else(|e| {
         eprintln!("No se pudo ejecutar '{cmd}': {e}");
         std::process::exit(1);
     });
-    if !status.success() {
-        eprintln!("'{cmd}' falló con código {}", status.code().unwrap_or(-1));
+    if !o.status.success() {
+        eprintln!("'{cmd}' falló con código {}", o.status.code().unwrap_or(-1));
         std::process::exit(1);
     }
+    String::from_utf8_lossy(&o.stdout).trim().to_string()
 }
 
 pub fn build_package(nombre: &str) {
-    let r = read_recipe(nombre);
-    let workdir = format!("firecipes/tmp/{}-{}", r.package.name, r.package.version);
-    let firecipes = "firecipes";
-    fs::create_dir_all(firecipes).expect("No se pudo crear firecipes/");
+    let r = recipe::load(nombre);
+    let workdir = format!("{}/tmp/{}-{}", recipe::FIRECIPES_DIR, r.package.name, r.package.version);
+    fs::create_dir_all(recipe::FIRECIPES_DIR).unwrap_or_else(|e| {
+        eprintln!("No se pudo crear {}: {e}", recipe::FIRECIPES_DIR);
+        std::process::exit(1);
+    });
     let _ = fs::remove_dir_all(&workdir);
-    fs::create_dir_all(&workdir).expect("No se pudo crear el directorio de trabajo");
+    fs::create_dir_all(&workdir).unwrap_or_else(|e| {
+        eprintln!("No se pudo crear el directorio de trabajo {workdir}: {e}");
+        std::process::exit(1);
+    });
 
-    run(
-        "git",
-        &["clone", "--depth", "1", "--branch", &r.source.tag, &r.source.url, &workdir],
-        None,
-    );
+    run("git", &["clone", "--depth", "1", "--branch", &r.source.tag, &r.source.url, &workdir], None);
 
     match r.build.kind.as_str() {
         "cargo" => {
@@ -77,22 +59,39 @@ pub fn build_package(nombre: &str) {
             args.extend(r.build.args.iter().map(String::as_str));
             run("cargo", &args, Some(&workdir));
         }
-        "make" => run("make", &r.build.args.iter().map(String::as_str).collect::<Vec<_>>(), Some(&workdir)),
+        "make" => {
+            let args: Vec<&str> = r.build.args.iter().map(String::as_str).collect();
+            run("make", &args, Some(&workdir));
+        }
         other => {
             eprintln!("Tipo de build no soportado: '{other}'");
             std::process::exit(1);
         }
     }
 
-    let artifact = format!("{workdir}/{}", r.build.output);
-    if !fs::metadata(&artifact).is_ok() {
-        eprintln!("No se encontró el artefacto esperado: {artifact}");
-        std::process::exit(1);
+    let bin_rel = recipe::find_binary(&workdir, &r.build.output, &r.package.name);
+    let tarball = format!("{}/{}", recipe::FIRECIPES_DIR, recipe::tarball_name(&r));
+    run("tar", &["czf", &tarball, "-C", &workdir, &bin_rel], None);
+    let _ = fs::remove_dir_all(&workdir);
+    println!("Paquete listo: {tarball}");
+
+    let repo = recipe::RELEASES_REPO;
+    let tag = recipe::release_tag(&r);
+    let prefix = format!("{}-v", r.package.name);
+    for t in out("gh", &["release", "list", "--repo", repo,
+        "--json", "tagName", "--jq", ".[].tagName"]).lines()
+    {
+        let t = t.trim();
+        if t != tag && t.starts_with(&prefix) {
+            run("gh", &["release", "delete", t, "--repo", repo, "--yes", "--cleanup-tag"], None);
+            println!("Eliminada release anterior: {t}");
+        }
     }
 
-    let tarball = format!("{firecipes}/{}.tar.gz", r.package.name);
-    run("tar", &["czf", &tarball, "-C", &workdir, &r.build.output], None);
-    let _ = fs::remove_dir_all(&workdir);
-
-    println!("Paquete listo: {tarball}");
+    // Si el release ya existe (ej. un intento parcial), igual subimos el asset.
+    run_ok("gh", &["release", "create", &tag, "--repo", repo, "--title", &tag,
+        "--notes", &format!("Release de {}", r.package.name)], None);
+    run("gh", &["release", "upload", &tag, "--repo", repo, "--clobber", &tarball], None);
+    let _ = fs::remove_dir_all(format!("{}/tmp", recipe::FIRECIPES_DIR));
+    println!("Publicado {tag} en {repo}");
 }

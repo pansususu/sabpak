@@ -1,0 +1,12 @@
+[package]
+name = "ripgrep"
+version = "0.2.0"
+
+[source]
+url = "https://github.com/BurntSushi/ripgrep.git"
+tag = "14.1.1"
+
+[build]
+type = "cargo"
+args = ["--release"]
+output = "target/release/ripgrep"

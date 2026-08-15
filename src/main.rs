@@ -1,5 +1,9 @@
 mod builder;
+mod config;
 mod helper;
+mod install;
+mod recipe;
+mod remove;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -9,21 +13,20 @@ fn main() {
                 println!("¿Que paquete desea instalar?");
                 return;
             };
-            println!("Iniciando la instalación de: {pkg}");
+            install::install_package(pkg);
         }
         Some("remove") => {
             let Some(pkg) = args.get(2) else {
                 println!("¿Que paquete desea remover?");
                 return;
             };
-            println!("Iniciando la limpieza de {pkg}");
+            remove::remove_package(pkg);
         }
         Some("build") => {
             let Some(pkg) = args.get(2) else {
                 println!("¿Que paquete desea compilar?");
                 return;
             };
-            println!("Iniciando la compilacion del paquete");
             builder::build_package(pkg);
         }
         Some("new") => {
@@ -40,7 +43,7 @@ fn main() {
             println!("sabpak remove <paquete>: Remueve un paquete de tu sistema");
             println!("sabpak search <paquete>: Buscar un paquete en los repositorios");
             println!("sabpak new <receta>: Crea una nueva receta con el helper");
-            println!("sabpak build <receta>: Compila y empaqueta una receta");
+            println!("sabpak build <receta>: Compila, empaqueta y publica una receta");
             println!("sabpak version: Muestra la version");
         }
         Some(_) => println!("Comando desconocido"),
