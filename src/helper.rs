@@ -21,7 +21,7 @@ struct Latest {
 }
 
 fn get<T: DeserializeOwned>(url: &str) -> Option<T> {
-    ureq::get(url).set("User-Agent", "elun").call().ok()?.into_json().ok()
+    ureq::get(url).set("User-Agent", "sabpak").call().ok()?.into_json().ok()
 }
 
 fn search(nombre: &str) -> Option<Repo> {

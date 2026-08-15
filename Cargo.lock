@@ -51,15 +51,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "elun"
-version = "0.1.0"
-dependencies = [
- "serde",
- "toml",
- "ureq",
-]
-
-[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -346,6 +337,15 @@ dependencies = [
  "ring",
  "rustls-pki-types",
  "untrusted",
+]
+
+[[package]]
+name = "sabpak"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "toml",
+ "ureq",
 ]
 
 [[package]]

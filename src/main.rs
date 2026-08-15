@@ -36,15 +36,15 @@ fn main() {
             };
             helper::new_recipe(receta);
         }
-        Some("search") => println!("elun search: en progreso"),
-        Some("version") | Some("--version") => println!("elun 0.1"),
+        Some("search") => println!("sabpak search: en progreso"),
+        Some("version") | Some("--version") => println!("sabpak 0.1"),
         Some("help") | None => {
-            println!("elun install <paquete>: Instala un paquete a tu sistema");
-            println!("elun remove <paquete>: Remueve un paquete de tu sistema");
-            println!("elun search <paquete>: Buscar un paquete en los repositorios");
-            println!("elun new <receta>: Crea una nueva receta con el helper");
-            println!("elun build <receta>: Compila, empaqueta y publica una receta");
-            println!("elun version: Muestra la version");
+            println!("sabpak install <paquete>: Instala un paquete a tu sistema");
+            println!("sabpak remove <paquete>: Remueve un paquete de tu sistema");
+            println!("sabpak search <paquete>: Buscar un paquete en los repositorios");
+            println!("sabpak new <receta>: Crea una nueva receta con el helper");
+            println!("sabpak build <receta>: Compila, empaqueta y publica una receta");
+            println!("sabpak version: Muestra la version");
         }
         Some(_) => println!("Comando desconocido"),
     }
