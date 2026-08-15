@@ -3,10 +3,10 @@ use std::process::Command;
 use std::sync::OnceLock;
 
 /// Prefijo de instalación. Defecto sistema (`/usr/local`), como una distro
-/// normal. Sobrescribible con `SABPAK_PREFIX` (útil en desarrollo o para el
+/// normal. Sobrescribible con `ELUN_PREFIX` (útil en desarrollo o para el
 /// amigo que quiera otro lugar).
 pub fn prefix() -> PathBuf {
-    match std::env::var("SABPAK_PREFIX") {
+    match std::env::var("ELUN_PREFIX") {
         Ok(p) if !p.is_empty() => PathBuf::from(p),
         _ => PathBuf::from("/usr/local"),
     }
@@ -20,7 +20,7 @@ pub fn needs_sudo() -> bool {
 fn probe_sudo() -> bool {
     let dir = bin_dir();
     std::fs::create_dir_all(&dir).ok();
-    let probe = dir.join(".sabpak_probe");
+    let probe = dir.join(".elun_probe");
     let writable = std::fs::write(&probe, b"x").is_ok();
     std::fs::remove_file(&probe).ok();
     !writable
@@ -33,7 +33,7 @@ pub fn user_cache() -> PathBuf {
     std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."))
-        .join(".cache/sabpak")
+        .join(".cache/elun")
 }
 
 pub fn bin_dir() -> PathBuf {
@@ -41,7 +41,7 @@ pub fn bin_dir() -> PathBuf {
 }
 
 fn state_file() -> PathBuf {
-    prefix().join("share/sabpak").join("installed.txt")
+    prefix().join("share/elun").join("installed.txt")
 }
 
 /// Ejecuta un comando elevado con sudo si hace falta.
