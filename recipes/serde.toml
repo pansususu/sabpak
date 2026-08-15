@@ -1,0 +1,12 @@
+[package]
+name = "serde"
+version = "0.1.0"
+
+[source]
+url = "https://github.com/serde-rs/serde.git"
+tag = "master"
+
+[build]
+type = "cargo"
+args = ["--release"]
+output = "target/release/serde"
