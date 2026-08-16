@@ -1,0 +1,12 @@
+[package]
+name = "alacritty"
+version = "0.17.0"
+
+[source]
+url = "https://github.com/alacritty/alacritty.git"
+tag = "v0.17.0"
+
+[build]
+type = "cargo"
+args = ["--release"]
+output = "target/release/alacritty"

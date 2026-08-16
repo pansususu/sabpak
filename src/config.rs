@@ -12,6 +12,16 @@ pub fn prefix() -> PathBuf {
     }
 }
 
+/// Directorio base para recetas y firecipes. Defecto: prefijo/share/sabpak.
+/// Sobrescribible con `SABPAK_DIR` (dev, o donde instalaste el árbol de
+/// recetas, p.ej. /usr/local/src/sabpak).
+pub fn base_dir() -> PathBuf {
+    match std::env::var("SABPAK_DIR") {
+        Ok(p) if !p.is_empty() => PathBuf::from(p),
+        _ => prefix().join("share/sabpak"),
+    }
+}
+
 /// true si el prefijo no es escribible por el usuario (hay que elevar con sudo).
 pub fn needs_sudo() -> bool {
     *NEEDS_SUDO.get_or_init(probe_sudo)
@@ -42,6 +52,15 @@ pub fn bin_dir() -> PathBuf {
 
 fn state_file() -> PathBuf {
     prefix().join("share/sabpak").join("installed.txt")
+}
+
+/// Repo donde se publican los binarios. Configurable para cuando el amigo
+/// monte su servidor (`SABPAK_RELEASES` / `ELUN_RELEASES`).
+pub fn releases_repo() -> String {
+    match std::env::var("SABPAK_RELEASES") {
+        Ok(r) if !r.is_empty() => r,
+        _ => "pansususu/packages".to_string(),
+    }
 }
 
 /// Ejecuta un comando elevado con sudo si hace falta.
@@ -77,18 +96,19 @@ fn entries() -> Vec<String> {
         .collect()
 }
 
-/// Recuerda qué binario instaló un paquete (el nombre instalado puede
-/// diferir del paquete, p.ej. `rg` vs `ripgrep`).
-pub fn remember(name: &str, bin: &str) {
+/// Recuerda qué binario instaló un paquete, con su versión. El nombre
+/// instalado puede diferir del paquete (p.ej. `rg` vs `ripgrep`).
+pub fn remember(name: &str, bin: &str, version: &str) {
     let keep = entries()
         .into_iter()
         .filter(|l| !l.starts_with(&format!("{name} ")))
         .collect::<Vec<_>>()
         .join("\n");
+    let line = format!("{name} {bin} {version}");
     let text = if keep.is_empty() {
-        format!("{name} {bin}\n")
+        format!("{line}\n")
     } else {
-        format!("{keep}\n{name} {bin}\n")
+        format!("{keep}\n{line}\n")
     };
     write_state(&text);
 }
@@ -96,12 +116,33 @@ pub fn remember(name: &str, bin: &str) {
 /// Binario instalado para `name`, si se registró.
 pub fn bin_name(name: &str) -> Option<String> {
     entries().into_iter().find_map(|l| {
-        let mut it = l.split(' ');
-        match (it.next(), it.next()) {
-            (Some(p), Some(b)) if p == name => Some(b.to_string()),
-            _ => None,
-        }
+        let v: Vec<&str> = l.split(' ').collect();
+        (v.first() == Some(&name)).then(|| v.get(1).unwrap_or(&"").to_string())
     })
+}
+
+/// Versión instalada para `name`, si se registró.
+pub fn installed_version(name: &str) -> Option<String> {
+    entries().into_iter().find_map(|l| {
+        let v: Vec<&str> = l.split(' ').collect();
+        (v.first() == Some(&name)).then(|| v.get(2).unwrap_or(&"").to_string())
+    })
+}
+
+/// Paquetes instalados: `(paquete, binario, versión)`.
+pub fn installed() -> Vec<(String, String, String)> {
+    entries()
+        .into_iter()
+        .filter_map(|l| {
+            let v: Vec<&str> = l.split(' ').collect();
+            match (v.get(0), v.get(1), v.get(2)) {
+                (Some(n), Some(b), Some(ver)) => {
+                    Some((n.to_string(), b.to_string(), ver.to_string()))
+                }
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 /// Olvida el registro de instalación de `name`.
@@ -121,7 +162,7 @@ pub fn forget(name: &str) {
 pub fn installed_packages() -> Vec<String> {
     entries()
         .into_iter()
-        .filter_map(|l| l.split(' ').next().map(str::to_string))
+        .filter_map(|l| l.split(' ').next().map(str::to_string).filter(|s| !s.is_empty()))
         .collect()
 }
 
@@ -131,8 +172,8 @@ pub fn cleanup() -> usize {
     let mut freed = 0;
 
     // 1) Caché: descargas incompletas (.part) u huérfanas (paquete no instalado).
+    let installed = installed_packages();
     if let Ok(rd) = std::fs::read_dir(user_cache()) {
-        let installed = installed_packages();
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
             if name.ends_with(".part")
@@ -152,11 +193,13 @@ pub fn cleanup() -> usize {
 
     // 3) Entradas de estado de binarios que ya no existen.
     let bin = bin_dir();
-    let keep: Vec<String> = entries()
-        .into_iter()
-        .filter(|l| l.split(' ').next_back().map(|b| bin.join(b).exists()).unwrap_or(false))
+    let all = entries();
+    let keep: Vec<String> = all
+        .iter()
+        .filter(|l| l.split(' ').nth(1).map(|b| bin.join(b).exists()).unwrap_or(false))
+        .cloned()
         .collect();
-    let stale = entries().len() - keep.len();
+    let stale = all.len() - keep.len();
     if stale > 0 {
         freed += stale;
         let text = if keep.is_empty() {
@@ -170,28 +213,30 @@ pub fn cleanup() -> usize {
 }
 
 /// Escribe el fichero de estado (con sudo si el prefijo es de sistema).
+/// Todo por argumentos separados (nada de cadenas shell ensambladas).
 fn write_state(text: &str) {
     use std::io::Write;
     let file = state_file();
-    let script = format!(
-        "mkdir -p {} && cat > {}",
-        file.parent().unwrap().display(),
-        file.display()
-    );
-    let mut c = Command::new(if needs_sudo() { "sudo" } else { "sh" });
+    let parent = file.parent().expect("state file sin directorio padre");
+    let (dir_s, file_s) = (parent.to_str().unwrap(), file.to_str().unwrap());
     if needs_sudo() {
-        c.arg("sh");
-    }
-    let mut child = c
-        .arg("-c")
-        .arg(script)
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .ok();
-    if let Some(mut ch) = child.take() {
-        if let Some(stdin) = ch.stdin.as_mut() {
-            let _ = stdin.write_all(text.as_bytes());
+        if !run_elev("install", &["-d", dir_s]) {
+            return;
         }
-        let _ = ch.wait();
+        if let Ok(mut child) = Command::new("sudo")
+            .args(["tee", file_s])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+        {
+            if let Some(stdin) = child.stdin.as_mut() {
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            let _ = child.wait();
+        }
+    } else {
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+        let _ = std::fs::write(&file, text);
     }
 }
