@@ -101,9 +101,7 @@ fn main() {
                 println!("¿Qué paquete desea actualizar?");
                 return;
             }
-            for pkg in pkgs {
-                update::update_package(pkg);
-            }
+            update::update_packages(&pkgs.to_vec());
         }
         Some("check") => {
             let pkgs = &args[2..];

@@ -1,47 +1,67 @@
-use crate::{config, install, recipe, ver};
+use crate::{config, recipe, ver};
 use std::process::Command;
 
-fn list_tags(repo: &str) -> Vec<String> {
+/// Lista los tags de release publicados. `None` si `gh` no está disponible o
+/// falla (para no abortar un lote).
+fn list_tags(repo: &str) -> Option<Vec<String>> {
     let o = Command::new("gh")
         .args(["release", "list", "--repo", repo, "--json", "tagName", "--jq", ".[].tagName"])
         .output()
-        .unwrap_or_else(|e| {
-            eprintln!("gh no disponible: {e}");
-            std::process::exit(1);
-        });
+        .ok()?;
     if !o.status.success() {
-        eprintln!("gh falló al listar releases");
-        std::process::exit(1);
+        return None;
     }
-    String::from_utf8_lossy(&o.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect()
+    Some(
+        String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect(),
+    )
 }
 
-/// Última versión publicada para `name` en el repo de releases.
-fn latest_version(name: &str) -> Option<String> {
+/// Última versión publicada para `name` entre `tags`.
+fn latest_version(name: &str, tags: &[String]) -> Option<String> {
     let prefix = format!("{name}-v");
-    list_tags(&config::releases_repo())
-        .into_iter()
+    tags.iter()
         .filter(|t| t.starts_with(&prefix))
         .map(|t| t[prefix.len()..].to_string())
         .max_by(|a, b| ver::cmp(a, b))
 }
 
-pub fn update_package(nombre: &str) {
+/// Actualiza los paquetes de la lista de una sola pasada (un único `gh
+/// release list` por lote) y reporta cuántos requirieron el cambio.
+pub fn update_packages(pkgs: &[String]) {
+    let repo = config::releases_repo();
+    let Some(tags) = list_tags(&repo) else {
+        eprintln!("No se pudieron consultar releases del repo {repo} (¿está instalado 'gh'?)");
+        return;
+    };
+    for nombre in pkgs {
+        update_one(nombre, &tags);
+    }
+}
+
+fn update_one(nombre: &str, tags: &[String]) {
     let r = recipe::load(nombre);
-    let installed = config::installed_version(nombre).unwrap_or_else(|| r.package.version.clone());
-    match latest_version(&r.package.name) {
-        None => println!("{nombre}: no hay releases publicadas"),
-        Some(latest) if latest == installed => {
-            println!("{nombre} ya está en la última versión ({installed})")
+    let name = r.package.name.clone();
+    let installed =
+        config::installed_version(&name).unwrap_or_else(|| r.package.version.clone());
+    match latest_version(&name, tags) {
+        None => println!("{name}: no hay releases publicadas"),
+        Some(latest)
+            if ver::cmp(&latest, &installed) == std::cmp::Ordering::Equal =>
+        {
+            println!("{name} ya está en la última versión ({installed})")
         }
         Some(latest) => {
-            println!("Actualizando {nombre} {installed} -> {latest}");
-            install::install_version(nombre, Some(latest));
+            println!("Actualizando {name} {installed} -> {latest}");
+            if crate::install::install_version(&name, Some(latest.clone())) {
+                println!("{name} actualizado a {latest}");
+            } else {
+                eprintln!("{name}: falló la actualización a {latest}");
+            }
         }
     }
 }

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs::Metadata;
 use std::path::PathBuf;
 
@@ -84,8 +85,10 @@ fn resolve_dfs(
     match state.get(nombre).copied() {
         Some(2) => return, // ya resuelto
         Some(1) => {
-            eprintln!("Ciclo de dependencias detectado en '{nombre}'");
-            std::process::exit(1);
+            // Ciclo: no lo marcamos como resuelto para no incluirlo en el
+            // orden, pero no abortamos el resto del lote.
+            eprintln!("Ciclo de dependencias detectado en '{nombre}' (se omite)");
+            return;
         }
         _ => {}
     }
@@ -130,15 +133,26 @@ pub fn find_binary(root: &str, out: &str, name: &str) -> Option<String> {
     // Todos los paths relativos que son ejecutables regulares.
     let mut executables: Vec<String> = Vec::new();
     let mut stack = vec![std::path::PathBuf::from(&base)];
+    // Protectores contra symlink-ciclos (tarballs maliciosos o rotos).
+    let mut seen: HashSet<std::path::PathBuf> = HashSet::new();
     while let Some(d) = stack.pop() {
+        // Resolvemos el directorio real para no re-escarbar ciclos.
+        let real = std::fs::canonicalize(&d).unwrap_or_else(|_| d.clone());
+        if !seen.insert(real) {
+            continue;
+        }
         let Ok(rd) = std::fs::read_dir(&d) else { continue };
         for e in rd.flatten() {
             let p = e.path();
-            if p.is_dir() {
-                stack.push(p);
-            } else if let Ok(m) = p.metadata() {
-                if is_exec_file(&m) {
-                    executables.push(rel(p));
+            // seguimos solo directorios que no son enlaces simbólicos
+            // (evita seguir symlinks arbitrarios del tarball).
+            if let Ok(mt) = p.symlink_metadata() {
+                if mt.file_type().is_dir() {
+                    stack.push(p);
+                } else if mt.file_type().is_file() && let Ok(m) = p.metadata() {
+                    if is_exec_file(&m) {
+                        executables.push(rel(p));
+                    }
                 }
             }
         }

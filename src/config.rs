@@ -1,26 +1,31 @@
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::OnceLock;
+use std::sync::{LazyLock, OnceLock};
 
 /// Prefijo de instalación. Defecto sistema (`/usr/local`), como una distro
 /// normal. Sobrescribible con `SABPAK_PREFIX` (útil en desarrollo o para el
-/// amigo que quiera otro lugar).
+/// amigo que quiera otro lugar). Cacheado: en un binario de una sola pasada
+/// el entorno no cambia a mitad de ejecución.
 pub fn prefix() -> PathBuf {
-    match std::env::var("SABPAK_PREFIX") {
-        Ok(p) if !p.is_empty() => PathBuf::from(p),
-        _ => PathBuf::from("/usr/local"),
-    }
+    PREFIX.clone()
 }
+
+static PREFIX: LazyLock<PathBuf> = LazyLock::new(|| match std::env::var("SABPAK_PREFIX") {
+    Ok(p) if !p.is_empty() => PathBuf::from(p),
+    _ => PathBuf::from("/usr/local"),
+});
 
 /// Directorio base para recetas y firecipes. Defecto: prefijo/share/sabpak.
 /// Sobrescribible con `SABPAK_DIR` (dev, o donde instalaste el árbol de
 /// recetas, p.ej. /usr/local/src/sabpak).
 pub fn base_dir() -> PathBuf {
-    match std::env::var("SABPAK_DIR") {
-        Ok(p) if !p.is_empty() => PathBuf::from(p),
-        _ => prefix().join("share/sabpak"),
-    }
+    BASE_DIR.clone()
 }
+
+static BASE_DIR: LazyLock<PathBuf> = LazyLock::new(|| match std::env::var("SABPAK_DIR") {
+    Ok(p) if !p.is_empty() => PathBuf::from(p),
+    _ => prefix().join("share/sabpak"),
+});
 
 /// true si el prefijo no es escribible por el usuario (hay que elevar con sudo).
 pub fn needs_sudo() -> bool {
@@ -40,11 +45,15 @@ static NEEDS_SUDO: OnceLock<bool> = OnceLock::new();
 
 /// Caché por-usuario (siempre escribible sin sudo).
 pub fn user_cache() -> PathBuf {
+    USER_CACHE.clone()
+}
+
+static USER_CACHE: LazyLock<PathBuf> = LazyLock::new(|| {
     std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."))
         .join(".cache/sabpak")
-}
+});
 
 pub fn bin_dir() -> PathBuf {
     prefix().join("bin")
@@ -57,11 +66,14 @@ fn state_file() -> PathBuf {
 /// Repo donde se publican los binarios. Configurable para cuando el amigo
 /// monte su servidor (`SABPAK_RELEASES` / `ELUN_RELEASES`).
 pub fn releases_repo() -> String {
-    match std::env::var("SABPAK_RELEASES") {
+    RELEASES_REPO.clone()
+}
+
+static RELEASES_REPO: LazyLock<String> =
+    LazyLock::new(|| match std::env::var("SABPAK_RELEASES") {
         Ok(r) if !r.is_empty() => r,
         _ => "pansususu/packages".to_string(),
-    }
-}
+    });
 
 /// Ejecuta un comando elevado con sudo si hace falta.
 pub fn run_elev(cmd: &str, args: &[&str]) -> bool {
@@ -94,6 +106,18 @@ fn entries() -> Vec<String> {
         .filter(|l| !l.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+/// Parsea una línea del estado bien formada `paquete binario version`.
+/// Devuelve `None` si la línea está incompleta o malformada.
+fn parse_line(l: &str) -> Option<(String, String, String)> {
+    let mut t = l.splitn(3, ' ');
+    match (t.next(), t.next(), t.next()) {
+        (Some(n), Some(b), Some(v)) if !n.is_empty() && !b.is_empty() => {
+            Some((n.to_string(), b.to_string(), v.to_string()))
+        }
+        _ => None,
+    }
 }
 
 /// Recuerda qué binario instaló un paquete, con su versión. El nombre
@@ -131,18 +155,7 @@ pub fn installed_version(name: &str) -> Option<String> {
 
 /// Paquetes instalados: `(paquete, binario, versión)`.
 pub fn installed() -> Vec<(String, String, String)> {
-    entries()
-        .into_iter()
-        .filter_map(|l| {
-            let v: Vec<&str> = l.split(' ').collect();
-            match (v.get(0), v.get(1), v.get(2)) {
-                (Some(n), Some(b), Some(ver)) => {
-                    Some((n.to_string(), b.to_string(), ver.to_string()))
-                }
-                _ => None,
-            }
-        })
-        .collect()
+    entries().into_iter().filter_map(|l| parse_line(&l)).collect()
 }
 
 /// Olvida el registro de instalación de `name`.
@@ -175,11 +188,16 @@ pub fn cleanup() -> usize {
     let installed = installed_packages();
     if let Ok(rd) = std::fs::read_dir(user_cache()) {
         for e in rd.flatten() {
+            // Solo archivos (no borramos el dir stow aquí).
+            let p = e.path();
+            if !p.is_file() {
+                continue;
+            }
             let name = e.file_name().to_string_lossy().into_owned();
             if name.ends_with(".part")
-                || !installed.iter().any(|p| name.starts_with(&format!("{p}-")))
+                || !installed.iter().any(|pkg| name.starts_with(&format!("{pkg}-")))
             {
-                if std::fs::remove_file(e.path()).is_ok() {
+                if std::fs::remove_file(&p).is_ok() {
                     freed += 1;
                 }
             }
@@ -196,7 +214,7 @@ pub fn cleanup() -> usize {
     let all = entries();
     let keep: Vec<String> = all
         .iter()
-        .filter(|l| l.split(' ').nth(1).map(|b| bin.join(b).exists()).unwrap_or(false))
+        .filter(|l| parse_line(l).map(|(_, b, _)| bin.join(b).exists()).unwrap_or(false))
         .cloned()
         .collect();
     let stale = all.len() - keep.len();
@@ -214,11 +232,15 @@ pub fn cleanup() -> usize {
 
 /// Escribe el fichero de estado (con sudo si el prefijo es de sistema).
 /// Todo por argumentos separados (nada de cadenas shell ensambladas).
+/// Toma un `flock` (LOCK_EX) sobre el fichero para no perder actualizaciones
+/// entre procesos concurrentes (solo funciona si el usuario puede abrirlo;
+/// con prefijo root cae en sudo, donde la escritura es atómica vía tee).
 fn write_state(text: &str) {
     use std::io::Write;
     let file = state_file();
     let parent = file.parent().expect("state file sin directorio padre");
     let (dir_s, file_s) = (parent.to_str().unwrap(), file.to_str().unwrap());
+    let _lock = LockGuard::acquire(&file);
     if needs_sudo() {
         if !run_elev("install", &["-d", dir_s]) {
             return;
@@ -238,5 +260,34 @@ fn write_state(text: &str) {
             return;
         }
         let _ = std::fs::write(&file, text);
+    }
+}
+
+/// `flock` advisory (LOCK_EX); mantiene el fd abierto para no soltar el lock.
+#[allow(dead_code)] // el File se conserva vivo para retener el lock
+struct LockGuard(std::fs::File);
+impl LockGuard {
+    #[cfg(unix)]
+    fn acquire(path: &std::path::Path) -> Option<LockGuard> {
+        use std::os::unix::io::AsRawFd;
+        const LOCK_EX: i32 = 2;
+        unsafe extern "C" {
+            #[link_name = "flock"]
+            fn flock(fd: i32, operation: i32) -> i32;
+        }
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(path)
+            .ok()?;
+        if unsafe { flock(f.as_raw_fd(), LOCK_EX) } == 0 {
+            Some(LockGuard(f))
+        } else {
+            None
+        }
+    }
+    #[cfg(not(unix))]
+    fn acquire(_path: &std::path::Path) -> Option<LockGuard> {
+        None
     }
 }

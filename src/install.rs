@@ -1,6 +1,6 @@
 use crate::{config, recipe};
 use std::fs;
-use std::io::copy;
+use std::io::{BufReader, BufWriter, Write};
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -13,25 +13,34 @@ fn download(r: &recipe::Recipe) -> Option<PathBuf> {
     fs::create_dir_all(&dir).ok();
     let fname = recipe::tarball_name(r);
     let tarball = dir.join(&fname);
-    if tarball.exists() {
+    // Reutilizamos la caché solo si el tarball no está vacío ni enviado a
+    // medias (devuelto por un rename previo antes de terminar de escribir).
+    if tarball.exists() && fs::metadata(&tarball).map(|m| m.len() > 0).unwrap_or(false) {
         return Some(tarball);
     }
-    let resp = match ureq::get(&format!("{}/{}/{}", dist(), recipe::release_tag(r), fname)).call() {
+    let url = format!("{}/{}/{}", dist(), recipe::release_tag(r), fname);
+    let resp = match ureq::get(&url).call() {
         Ok(r) => r,
+        Err(ureq::Error::Status(404, _)) => {
+            eprintln!("No existe el release {fname}");
+            return None;
+        }
+        Err(ureq::Error::Status(code, _)) => {
+            eprintln!("Descarga de {fname} falló (HTTP {code})");
+            return None;
+        }
         Err(e) => {
             eprintln!("No se pudo descargar {fname}: {e}");
             return None;
         }
     };
-    if resp.status() == 404 {
-        eprintln!("No existe el release {fname}");
-        return None;
-    }
     // Parte temporal única por proceso para evitar que dos procesos se pisen.
     let part = dir.join(format!("{fname}.part.{}", std::process::id()));
     let res = (|| -> std::io::Result<()> {
-        let mut out = fs::File::create(&part)?;
-        copy(&mut resp.into_reader(), &mut out)?;
+        let mut out = BufWriter::with_capacity(1 << 16, fs::File::create(&part)?);
+        let mut src = BufReader::with_capacity(1 << 16, resp.into_reader());
+        std::io::copy(&mut src, &mut out)?;
+        out.flush()?;
         fs::rename(&part, &tarball)?;
         Ok(())
     })();
@@ -52,9 +61,7 @@ pub fn install_package(nombre: &str) -> usize {
             println!("{p} ya está instalado");
             continue;
         }
-        if install_one(&p, None) {
-            // ok
-        } else {
+        if !install_one(&p, None) {
             fails += 1;
         }
     }
@@ -63,8 +70,8 @@ pub fn install_package(nombre: &str) -> usize {
 
 /// Instala `nombre`; si `version` es `Some`, fuerza esa versión. Solo
 /// resuelve ese paquete (sin sus dependencias), útil para `update`.
-pub fn install_version(nombre: &str, version: Option<String>) {
-    install_one(nombre, version);
+pub fn install_version(nombre: &str, version: Option<String>) -> bool {
+    install_one(nombre, version)
 }
 
 fn install_one(nombre: &str, version: Option<String>) -> bool {

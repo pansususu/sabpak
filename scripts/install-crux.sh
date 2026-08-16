@@ -136,14 +136,20 @@ if ! chrun "id -u $USERNAME"; then
 fi
 chrun "echo '$USERNAME:$user_pass' | chpasswd"
 
-# --- Toolchain: git y rust ---
-# En CRUX real con ports: prt-get update && prt-get install git rust.
+# --- Toolchain: git, sudo, gh y rust ---
+# En CRUX real con ports: prt-get update && prt-get install git sudo github-cli rust.
 # Como alternativa rápida (requiere curl/ca-certificates en la base) se usa rustup.
 chrun "export CARGO_HOME=/root/.cargo RUSTUP_HOME=/root/.rustup; \\
        command -v cargo >/dev/null 2>&1 || \\
        ( command -v curl >/dev/null 2>&1 && \\
          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal ) || \\
          echo 'AVISO: instala rust con: prt-get update && prt-get install rust'"
+# `sudo` y `gh` son imprescindibles (el prefijo por defecto es de root y las
+# publicaciones usan gh). Intento instalarlos por ports; si no, aviso claro.
+chrun "command -v sudo >/dev/null 2>&1 || (prt-get update >/dev/null 2>&1 && prt-get install sudo) || \\
+         echo 'AVISO: instala sudo con: prt-get install sudo'"
+chrun "command -v gh >/dev/null 2>&1 || (prt-get update >/dev/null 2>&1 && prt-get install github-cli) || \\
+         echo 'AVISO: instala gh (github-cli) con: prt-get install github-cli'"
 
 # --- Repo y gestor sabpak ---
 if ! chrun "command -v git >/dev/null 2>&1"; then
@@ -153,10 +159,15 @@ else
            git clone --depth 1 $REPO /usr/local/src/sabpak 2>/dev/null || true; \\
            cd /usr/local/src/sabpak && \\
            cargo build --release && \\
-           install -Dm755 target/release/sabpak /usr/local/bin/sabpak && \\
-           echo 'SABPAK_DIR=/usr/local/src/sabpak' > /etc/sabpak.env"
+           install -Dm755 target/release/sabpak /usr/local/bin/sabpak"
 fi
+# SABPAK_DIR para que las recetas se resuelvan desde el árbol clonado.
 mkdir -p "$MOUNT/usr/local/src/sabpak/recipes" "$MOUNT/usr/local/src/sabpak/firecipes"
+mkdir -p "$MOUNT/etc/profile.d"
+cat > "$MOUNT/etc/profile.d/zz-sabpak.sh" <<'EOF'
+SABPAK_DIR=/usr/local/src/sabpak
+export SABPAK_DIR
+EOF
 
 # --- Salida ---
 swapon -a 2>/dev/null || true

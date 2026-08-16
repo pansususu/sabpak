@@ -1,12 +1,6 @@
 use crate::recipe;
 use std::{fs, process::Command};
 
-fn run(cmd: &str, args: &[&str], dir: Option<&str>) {
-    if !run_ok(cmd, args, dir) {
-        std::process::exit(1);
-    }
-}
-
 fn run_ok(cmd: &str, args: &[&str], dir: Option<&str>) -> bool {
     let status = match dir {
         Some(d) => Command::new(cmd).args(args).current_dir(d).status(),
@@ -26,34 +20,42 @@ fn run_ok(cmd: &str, args: &[&str], dir: Option<&str>) -> bool {
     false
 }
 
-fn out(cmd: &str, args: &[&str]) -> String {
-    let o = Command::new(cmd).args(args).output().unwrap_or_else(|e| {
-        eprintln!("No se pudo ejecutar '{cmd}': {e}");
-        std::process::exit(1);
-    });
+/// Captura la salida de un comando; `None` si no está disponible o falla.
+fn out(cmd: &str, args: &[&str]) -> Option<String> {
+    let o = Command::new(cmd).args(args).output().ok()?;
     if !o.status.success() {
         eprintln!("'{cmd}' falló con código {}", o.status.code().unwrap_or(-1));
-        std::process::exit(1);
+        None
+    } else {
+        Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
     }
-    String::from_utf8_lossy(&o.stdout).trim().to_string()
 }
 
 /// Descarga una URL arbitraria a `dest` (para fuentes tipo archive).
-fn download_to(url: &str, dest: &str) {
-    let resp = ureq::get(url).call().unwrap_or_else(|e| {
-        eprintln!("No se pudo descargar {url}: {e}");
-        std::process::exit(1);
-    });
-    let part = format!("{dest}.part");
+/// Parte temporal única por proceso (`.part.<pid>`) y limpieza en error.
+fn download_to(url: &str, dest: &str) -> bool {
+    use std::io::Write;
+    let resp = match ureq::get(url).call() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("No se pudo descargar {url}: {e}");
+            return false;
+        }
+    };
+    let part = format!("{dest}.part.{}", std::process::id());
     let res = (|| -> std::io::Result<()> {
-        let mut f = fs::File::create(&part)?;
+        let mut f = std::io::BufWriter::with_capacity(1 << 16, fs::File::create(&part)?);
         std::io::copy(&mut resp.into_reader(), &mut f)?;
+        f.flush()?;
         fs::rename(&part, dest)?;
         Ok(())
     })();
     if let Err(e) = res {
+        let _ = fs::remove_file(&part);
         eprintln!("No se pudo guardar {dest}: {e}");
-        std::process::exit(1);
+        false
+    } else {
+        true
     }
 }
 
@@ -107,41 +109,50 @@ fn run_build(workdir: &str, kind: &str, args: &[&str]) -> bool {
 pub fn build_package(nombre: &str) -> bool {
     let r = recipe::load(nombre);
     let fc = recipe::firecipes_dir();
+    if fs::create_dir_all(&fc).is_err() {
+        eprintln!("No se pudo crear {}", fc.display());
+        return false;
+    }
     let workdir = fc.join("tmp").join(format!("{}-{}", r.package.name, r.package.version));
-    fs::create_dir_all(&fc).unwrap_or_else(|e| {
-        eprintln!("No se pudo crear {}: {e}", fc.display());
-        std::process::exit(1);
-    });
     let _ = fs::remove_dir_all(&workdir);
-    fs::create_dir_all(&workdir).unwrap_or_else(|e| {
-        eprintln!("No se pudo crear el directorio de trabajo {}: {e}", workdir.display());
-        std::process::exit(1);
-    });
+    if fs::create_dir_all(&workdir).is_err() {
+        eprintln!("No se pudo crear el directorio de trabajo {}", workdir.display());
+        return false;
+    }
 
     // --- Obtener fuentes ---
-    let mut build_root = workdir.to_string_lossy().into_owned();
-    match r.source.kind.as_str() {
-        "git" => {
-            run(
-                "git",
-                &["clone", "--depth", "1", "--branch", &r.source.tag, &r.source.url, workdir.to_str().unwrap()],
-                None,
-            );
-        }
+    let wd_s = workdir.to_str().unwrap().to_string();
+    let mut build_root = wd_s.clone();
+    let fetched = match r.source.kind.as_str() {
+        "git" => run_ok(
+            "git",
+            &["clone", "--depth", "1", "--branch", &r.source.tag, &r.source.url, &wd_s],
+            None,
+        ),
         "archive" => {
             let fname = r.source.url.rsplit('/').next().unwrap_or("source.tar.gz");
             let archive = fc.join(fname);
-            download_to(&r.source.url, archive.to_str().unwrap());
-            run("tar", &["xf", archive.to_str().unwrap(), "-C", workdir.to_str().unwrap()], None);
-            // Los tarballs suelen extraer en una única subcarpeta de primer
-            // nivel (`pkg-version/`); entramos en ella para compilar.
-            build_root = archive_root(workdir.to_str().unwrap());
+            if !download_to(&r.source.url, archive.to_str().unwrap()) {
+                false
+            } else {
+                // Los tarballs suelen extraer en una única subcarpeta de
+                // primer nivel (`pkg-version/`); entramos en ella para compilar.
+                if run_ok("tar", &["xf", archive.to_str().unwrap(), "-C", &wd_s], None) {
+                    build_root = archive_root(&wd_s);
+                    true
+                } else {
+                    false
+                }
+            }
         }
         other => {
             eprintln!("Tipo de fuente no soportado: '{other}'");
-            let _ = fs::remove_dir_all(&workdir);
-            return false;
+            false
         }
+    };
+    if !fetched {
+        let _ = fs::remove_dir_all(&workdir);
+        return false;
     }
 
     // Si el kind es "auto" (o la receta no lo indica claro), detectamos del árbol.
@@ -152,13 +163,12 @@ pub fn build_package(nombre: &str) -> bool {
         (r.build.kind.clone(), r.build.args.clone())
     };
     let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
-    let ok = run_build(&build_root, &kind, &args_ref);
-    if !ok {
+    if !run_build(&build_root, &kind, &args_ref) {
         let _ = fs::remove_dir_all(&workdir);
         return false;
     }
 
-    let Some(bin_rel) = recipe::find_binary(workdir.to_str().unwrap(), &r.build.output, &r.package.name) else {
+    let Some(bin_rel) = recipe::find_binary(&wd_s, &r.build.output, &r.package.name) else {
         eprintln!(
             "No se pudo autodetectar el binario de '{}' en {} (se esperaba '{}/')",
             r.package.name, workdir.display(), r.build.output
@@ -168,32 +178,39 @@ pub fn build_package(nombre: &str) -> bool {
     };
     println!("Binario detectado: {bin_rel}");
     let tarball = fc.join(recipe::tarball_name(&r));
-    run(
+    if !run_ok(
         "tar",
-        &["czf", tarball.to_str().unwrap(), "-C", workdir.to_str().unwrap(), bin_rel.as_str()],
+        &["czf", tarball.to_str().unwrap(), "-C", &wd_s, bin_rel.as_str()],
         None,
-    );
+    ) {
+        let _ = fs::remove_dir_all(&workdir);
+        return false;
+    }
     let _ = fs::remove_dir_all(&workdir);
     println!("Paquete listo: {}", tarball.display());
 
+    // --- Publicar en GitHub Releases ---
     let repo = crate::config::releases_repo();
     let tag = recipe::release_tag(&r);
     let prefix = format!("{}-v", r.package.name);
-    for t in out("gh", &["release", "list", "--repo", &repo,
-        "--json", "tagName", "--jq", ".[].tagName"]).lines()
-    {
-        let t = t.trim();
-        if t != tag && t.starts_with(&prefix) {
-            run("gh", &["release", "delete", t, "--repo", &repo, "--yes", "--cleanup-tag"], None);
-            println!("Eliminada release anterior: {t}");
+    let existing = out("gh", &["release", "list", "--repo", &repo,
+        "--json", "tagName", "--jq", ".[].tagName"]);
+    if let Some(list) = existing {
+        for t in list.lines().map(str::trim).filter(|t| !t.is_empty()) {
+            if t != tag && t.starts_with(&prefix) {
+                if run_ok("gh", &["release", "delete", t, "--repo", &repo, "--yes", "--cleanup-tag"], None) {
+                    println!("Eliminada release anterior: {t}");
+                }
+            }
         }
     }
 
-    // Si el release ya existe (ej. un intento parcial), igual subimos el asset.
+    // Si le release ya existe (ej. un intento parcial), igual subimos el asset.
     run_ok("gh", &["release", "create", &tag, "--repo", &repo, "--title", &tag,
         "--notes", &format!("Release de {}", r.package.name)], None);
-    run("gh", &["release", "upload", &tag, "--repo", &repo, "--clobber", tarball.to_str().unwrap()], None);
-    let _ = fs::remove_dir_all(fc.join("tmp"));
+    if !run_ok("gh", &["release", "upload", &tag, "--repo", &repo, "--clobber", tarball.to_str().unwrap()], None) {
+        return false;
+    }
     println!("Publicado {tag} en {repo}");
     true
 }
