@@ -23,10 +23,7 @@ rm -rf "$STAGE/.git" "$STAGE/target" "$STAGE/firecipes" "$STAGE/recipes/ripgrep.
 #    y los prefijos SABPAK_ -> ELUN_) para que la variante sea autosuficiente.
 find "$STAGE" -type f \
   \( -name '*.rs' -o -name 'Cargo.toml' -o -name 'Cargo.lock' -o -name '*.sh' \) \
-  -exec sed -i 's/SABPAK_PREFIX/ELUN_PREFIX/g; \
-                 s/SABPAK_DIR/ELUN_DIR/g; \
-                 s/SABPAK_RELEASES/ELUN_RELEASES/g; \
-                 s/sabpak/elun/g' {} +
+  -exec sed -i 's/SABPAK_PREFIX/ELUN_PREFIX/g;s/SABPAK_DIR/ELUN_DIR/g;s/SABPAK_RELEASES/ELUN_RELEASES/g;s/sabpak/elun/g' {} +
 # El sed anterior renombró también scripts/install-crux.sh dentro del stage.
 find "$STAGE"/scripts -maxdepth 1 -type f -iname '*sabpak*' -exec sh -c '
   for f; do mv "$f" "$(dirname "$f")/$(basename "$f" | sed s/sabpak/elun/g)"; done
